@@ -1,0 +1,138 @@
+services:
+  # Frontend service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - user-service
+      - vehicle-service
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # User service
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    container_name: user-service
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./user-service/.env
+    environment:
+      MONGO_URI: mongodb://admin:admin@mongodb-user-service:27017/user-service?authSource=admin
+      RABBITMQ_HOST: amqp://admin:admin@rabbitmq:5672
+    depends_on:
+      - mongodb-user-service
+      - rabbitmq
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # Vehicle service
+  vehicle-service:
+    build:
+      context: ./vehicle-service
+      dockerfile: Dockerfile
+    container_name: vehicle-service
+    ports:
+      - "3001:3000"
+    env_file:
+      - ./vehicle-service/.env
+    environment:
+      MONGO_URI: mongodb://admin:admin@mongodb-vehicle-service:27017/vehicle-service?authSource=admin
+      RABBITMQ_HOST: amqp://admin:admin@rabbitmq:5672
+    depends_on:
+      - mongodb-vehicle-service
+      - rabbitmq
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # RabbitMQ message broker
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # MongoDB for User Service
+  mongodb-user-service:
+    image: mongo:7
+    container_name: mongodb-user-service
+    ports:
+      - "27018:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin
+    volumes:
+      - mongodb-user-service_data:/data/db
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: echo 'db.adminCommand("ping")' | mongosh localhost/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MongoDB for Vehicle Service
+  mongodb-vehicle-service:
+    image: mongo:7
+    container_name: mongodb-vehicle-service
+    ports:
+      - "27019:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin
+    volumes:
+      - mongodb-vehicle-service_data:/data/db
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: echo 'db.adminCommand("ping")' | mongosh localhost/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:latest
+    container_name: nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - nginx_data:/var/www/html
+    networks:
+      - backend
+
+volumes:
+  rabbitmq_data:
+  mongodb-user-service_data:
+  mongodb-vehicle-service_data:
+  nginx_data:
+
+networks:
+  backend:
+    driver: bridge
