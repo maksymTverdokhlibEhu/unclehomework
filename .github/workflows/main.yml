@@ -66,7 +66,7 @@ jobs:
         run: |
           BUILD_IMAGES="false"
 
-          # 1. Ручной запуск
+          # 1. Ручной запуск через Workflow Dispatch
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.build_images }}" = "true" ]; then
             BUILD_IMAGES="true"
             echo "Manual override: build_images=true"
@@ -76,7 +76,7 @@ jobs:
             BEFORE_SHA="${{ github.event.before }}"
             AFTER_SHA="${{ github.sha }}"
 
-            # Если это самый первый коммит или ветка только создана
+            # Если это самый первый коммит в ветке
             if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
               BUILD_IMAGES="true"
               echo "Initial push: forcing build."
@@ -88,18 +88,19 @@ jobs:
 
               while IFS= read -r file; do
                 case "$file" in
+                  # Если изменился любой файл в папках сервисов
+                  frontend/* | user-service/* | vehicle-service/*)
+                    BUILD_IMAGES="true"
+                    echo "Changes in service directory detected: $file"
+                    break ;;
+                  
                   # Корневые конфиги докера
                   "docker-compose.yaml" | "docker-compose.yml" | "docker-compose.dev.yaml")
                     BUILD_IMAGES="true"
                     break ;;
                   
-                  # Dockerfile в любой из папок (frontend, user-service, etc.)
+                  # Dockerfile в корне (если есть) или любые другие Dockerfile
                   *"Dockerfile")
-                    BUILD_IMAGES="true"
-                    break ;;
-                  
-                  # Зависимости и конфиги сборки (package.json, tsconfig и т.д.)
-                  *"package.json" | *"package-lock.json" | *"tsconfig.json" | *"vite.config.ts")
                     BUILD_IMAGES="true"
                     break ;;
                 esac
