@@ -112,50 +112,52 @@ jobs:
       - name: Execute Remote Deploy
         run: |
           SSH_OPTS="-o StrictHostKeyChecking=accept-new -i ~/.ssh/id_ed25519"
+          # Получаем решение о билде из предыдущего шага
           BUILD_IMAGES="${{ steps.build_mode.outputs.build_images }}"
           
-          # Генерируем скрипт для запуска на сервере
           cat > remote_script.sh << 'EOF'
           set -euo pipefail
           
-          # ШАГ 1: Очистка места. На t2.medium 4ГБ ОЗУ, Swap не критичен, а место на диске — да.
-          echo "Cleaning up disk space before build..."
-          sudo docker system prune -f          # Удалит остановленные контейнеры и неиспользуемые сети
-          sudo docker builder prune -f || true # Удалит кэш сборки (часто занимает ГИГАБАЙТЫ)
+          # 1. Очистка старого мусора (на всякий случай)
+          echo "Cleaning up Docker builder cache..."
+          sudo docker builder prune -f || true
 
+          # 2. Переход в папку приложения
           mkdir -p ~/my-app && cd ~/my-app
 
+          # Если папка не репозиторий - клонируем
           if [ ! -d ".git" ]; then
             cd .. && rm -rf my-app
             git clone https://github.com/maksymTverdokhlibEhu/unclehomework.git my-app
             cd my-app
           fi
 
+          # 3. Обновляем код
           git fetch origin master && git reset --hard origin/master
 
-          # Билд и запуск
           COMPOSE_CMD="sudo docker compose"
           
+          # 4. Сборка образов (если сработал триггер или ручной запуск)
           if [ "$BUILD_IMAGES" = "true" ]; then
-            echo "Full rebuild started..."
-            # Если места мало, удалим старые образы прямо перед билдом
-            sudo docker image prune -a -f || true 
+            echo "Forcing build of Docker images..."
             export DOCKER_BUILDKIT=0
             $COMPOSE_CMD build user-service vehicle-service frontend
           fi
 
-          echo "Starting stack..."
+          # 5. Запуск инфраструктуры
+          echo "Starting MongoDB and RabbitMQ..."
           $COMPOSE_CMD up -d mongodb-user-service mongodb-vehicle-service rabbitmq
           
-          echo "Waiting for DBs..."
+          echo "Waiting 15 seconds for DBs to initialize..."
           sleep 15 
 
+          # 6. Запуск основных сервисов
+          echo "Starting application services and Nginx..."
           $COMPOSE_CMD up -d user-service vehicle-service frontend nginx
           
-          # Финальная очистка
+          # Удаляем старые ненужные образы
           sudo docker image prune -f
           EOF
 
-          # Отправляем и запускаем
+          # Отправляем скрипт на сервер и запускаем его
           ssh $SSH_OPTS ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "BUILD_IMAGES=$BUILD_IMAGES bash -s" < remote_script.sh
-  
