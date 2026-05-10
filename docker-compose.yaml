@@ -115,6 +115,13 @@ services:
   nginx:
     image: nginx:latest
     container_name: nginx
+    depends_on:
+      - frontend
+      - user-service
+      - vehicle-service
+      - rabbitmq
+      - mongodb-user-service
+      - mongodb-vehicle-service
     ports:
       - "80:80"
     volumes:
