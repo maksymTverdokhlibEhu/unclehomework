@@ -1,0 +1,159 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      build_images:
+        description: "Force rebuild Docker images on EC2"
+        required: false
+        default: "false"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: deploy-ec2-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Copy SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+      - name: Add EC2 host key
+        run: |
+          touch ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          ssh-keyscan -T 10 -p 22 -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts || echo "ssh-keyscan failed, will use accept-new"
+          chmod 644 ~/.ssh/known_hosts
+      - name: Wait for SSH port
+        run: |
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if timeout 5 bash -c "cat < /dev/null > /dev/tcp/${{ secrets.EC2_HOST }}/22" 2>/dev/null; then
+              echo "SSH port 22 is reachable"
+              exit 0
+            fi
+            echo "SSH port is not reachable yet (attempt $attempt/12), waiting 10s..."
+            sleep 10
+          done
+          echo "SSH port 22 is still unreachable after multiple attempts"
+          exit 1
+      - name: Test SSH connection
+        run: |
+          SSH_OPTS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts -o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o TCPKeepAlive=yes -o ConnectTimeout=60"
+          for attempt in 1 2 3 4 5; do
+            if ssh -i ~/.ssh/id_ed25519 $SSH_OPTS ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "echo 'SSH OK'"; then
+              exit 0
+            fi
+            echo "SSH test failed (attempt $attempt/5), waiting 15s..."
+            sleep 15
+          done
+          echo "SSH test failed after multiple attempts"
+          exit 1
+      - name: Decide build mode
+        id: build_mode
+        run: |
+          BUILD_IMAGES="false"
+
+          # 1. Ручной запуск
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.build_images }}" = "true" ]; then
+            BUILD_IMAGES="true"
+            echo "Manual override: build_images=true"
+            
+          # 2. Автоматический пуш в master
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            BEFORE_SHA="${{ github.event.before }}"
+            AFTER_SHA="${{ github.sha }}"
+
+            # Если это самый первый коммит или ветка только создана
+            if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              BUILD_IMAGES="true"
+              echo "Initial push: forcing build."
+            else
+              # Сравниваем изменения между коммитами
+              CHANGED_FILES=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA")
+              echo "Changes detected in:"
+              echo "$CHANGED_FILES"
+
+              while IFS= read -r file; do
+                case "$file" in
+                  # Корневые конфиги докера
+                  "docker-compose.yaml" | "docker-compose.yml" | "docker-compose.dev.yaml")
+                    BUILD_IMAGES="true"
+                    break ;;
+                  
+                  # Dockerfile в любой из папок (frontend, user-service, etc.)
+                  *"Dockerfile")
+                    BUILD_IMAGES="true"
+                    break ;;
+                  
+                  # Зависимости и конфиги сборки (package.json, tsconfig и т.д.)
+                  *"package.json" | *"package-lock.json" | *"tsconfig.json" | *"vite.config.ts")
+                    BUILD_IMAGES="true"
+                    break ;;
+                esac
+              done <<< "$CHANGED_FILES"
+            fi
+          fi
+
+          echo "build_images=$BUILD_IMAGES" >> "$GITHUB_OUTPUT"
+          echo "FINAL DECISION: build_images=$BUILD_IMAGES"
+      - name: Execute Remote Deploy
+        run: |
+          SSH_OPTS="-o StrictHostKeyChecking=accept-new -i ~/.ssh/id_ed25519"
+          BUILD_IMAGES="${{ steps.build_mode.outputs.build_images }}"
+          
+          # Генерируем скрипт для запуска на сервере
+          cat > remote_script.sh << 'EOF'
+          set -euo pipefail
+          
+          echo "Checking Swap..."
+          if [ $(sudo swapon --show | wc -l) -lt 2 ]; then
+            sudo fallocate -l 1G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=1024
+            sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+          fi
+
+          mkdir -p ~/my-app && cd ~/my-app
+
+          if [ ! -d ".git" ]; then
+            cd .. && rm -rf my-app
+            git clone https://github.com/maksymTverdokhlibEhu/unclehomework.git my-app
+            cd my-app
+          fi
+
+          git fetch origin master && git reset --hard origin/master
+
+          # Билд и запуск
+          COMPOSE_CMD="sudo docker compose"
+          
+          if [ "$BUILD_IMAGES" = "true" ]; then
+            echo "Full rebuild started..."
+            export DOCKER_BUILDKIT=0
+            $COMPOSE_CMD build user-service vehicle-service frontend
+          fi
+
+          echo "Starting stack..."
+          $COMPOSE_CMD up -d mongodb-user-service mongodb-vehicle-service rabbitmq
+          
+          echo "Waiting for DBs..."
+          sleep 15 
+
+          $COMPOSE_CMD up -d user-service vehicle-service frontend nginx
+          sudo docker image prune -f
+          EOF
+
+          # Отправляем и запускаем
+          ssh $SSH_OPTS ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} "BUILD_IMAGES=$BUILD_IMAGES bash -s" < remote_script.sh
+
+  
