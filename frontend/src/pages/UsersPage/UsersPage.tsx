@@ -16,7 +16,7 @@ function UsersPage() {
 
   return (
     <section className="route-card p-2.5">
-      test deploy
+      test deploy variant 2
       <h1 className="mb-6 text-3xl font-bold text-gray-900">Users page</h1>
       {isLoading ? (
         <div>Loading...</div>

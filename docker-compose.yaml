@@ -17,6 +17,7 @@
 
     # User service
     user-service:
+      build: ./user-service
       image: themaxopti/testtask-user-service:latest
       container_name: user-service
       ports:
@@ -35,6 +36,7 @@
 
     # Vehicle service
     vehicle-service:
+      build: ./vehicle-service
       image: themaxopti/testtask-vehicle-service:latest
       container_name: vehicle-service
       ports:
